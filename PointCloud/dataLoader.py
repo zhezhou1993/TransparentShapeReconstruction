@@ -126,7 +126,8 @@ class BatchLoader(Dataset):
             shape = osp.join(dataRoot, 'Shape__%d' % n )
             if not osp.isdir(shape ):
                 continue
-            imNames = sorted(glob.glob(osp.join(shape, 'im_*.rgbe' ) ) )
+            # imNames = sorted(glob.glob(osp.join(shape, 'im_*.rgbe' ) ) )
+            imNames = sorted(glob.glob(osp.join(shape, 'im_*.png' ) ) )
             random.shuffle(imNames )
             if len(imNames ) < camNum:
                 print('%s: %d' % (shape, len(imNames) ) )
@@ -176,9 +177,11 @@ class BatchLoader(Dataset):
 
         imScale = None
         for imName in imNames:
-            twoBounceName = imName.replace('im_', 'imtwoBounce_').replace('.rgbe', '.npy')
+            # twoBounceName = imName.replace('im_', 'imtwoBounce_').replace('.rgbe', '.npy')
+            twoBounceName = imName.replace('im_', 'imVH_twoBounce_').replace('.png', '.npy')
             if not osp.isfile(twoBounceName ):
-                twoBounceName = imName.replace('im_', 'imtwoBounce_').replace('.rgbe', '.h5')
+                # twoBounceName = imName.replace('im_', 'imtwoBounce_').replace('.rgbe', '.h5')
+                twoBounceName = imName.replace('im_', 'imVH_twoBounce_').replace('.png', '.h5')
                 hf = h5py.File(twoBounceName, 'r')
                 twoBounce = np.array(hf.get('data'), dtype=np.float32 )
                 hf.close()
@@ -251,19 +254,34 @@ class BatchLoader(Dataset):
 
             if self.isLoadEnvmap:
                 envFileName = self.envList[shapeId ]
-                scale = self.scaleList[shapeId ]
-                env = cv2.imread(envFileName, -1)[:, :, ::-1]
+                #scale = self.scaleList[shapeId ]
+                env = cv2.cvtColor(cv2.imread(envFileName, -1), cv2.COLOR_BGRA2BGR)[:, :, ::-1]
+                #env = cv2.imread(envFileName, -1)[:, :, ::-1]
                 env = cv2.resize(env, (self.envWidth, self.envHeight ), interpolation=cv2.INTER_LINEAR)
                 env = np.ascontiguousarray(env )
-                env = env.transpose([2, 0, 1]) * imScale * scale
+                env = env / 255
+                #env = env.transpose([2, 0, 1]) * imScale * scale
+                env = env.transpose([2, 0, 1]).astype(np.float32)
 
                 envs.append(env[np.newaxis, :] )
 
 
+                # envFileName = self.envList[shapeId ]
+                # scale = self.scaleList[shapeId ]
+                # env = cv2.imread(envFileName, -1)[:, :, ::-1]
+                # env = cv2.resize(env, (self.envWidth, self.envHeight ), interpolation=cv2.INTER_LINEAR)
+                # env = np.ascontiguousarray(env )
+                # env = env.transpose([2, 0, 1]) * imScale * scale
+
+                # envs.append(env[np.newaxis, :] )
+
+
             if self.isLoadVH:
-                twoBounceVHName = imName.replace('im_', 'imVH_%dtwoBounce_' % self.camNum ).replace('.rgbe', '.npy')
+                # twoBounceVHName = imName.replace('im_', 'imVH_%dtwoBounce_' % self.camNum ).replace('.rgbe', '.npy')
+                twoBounceVHName = imName.replace('im_', 'imVH_twoBounce_').replace('.png', '.npy')
                 if not osp.isfile(twoBounceVHName ):
-                    twoBounceVHName = imName.replace('im_', 'imVH_%dtwoBounce_' % self.camNum ).replace('.rgbe', '.h5')
+                    # twoBounceVHName = imName.replace('im_', 'imVH_%dtwoBounce_' % self.camNum ).replace('.rgbe', '.h5')
+                    twoBounceVHName = imName.replace('im_', 'imVH_twoBounce_').replace('.png', '.h5')
                     hf = h5py.File(twoBounceVHName, 'r')
                     twoBounceVH = np.array(hf.get('data'), dtype=np.float32 )
                     hf.close()
@@ -315,9 +333,11 @@ class BatchLoader(Dataset):
                 depth2VHs.append(depth2VH[np.newaxis, :] )
 
             if self.isLoadOptim:
-                twoNormalName = imName.replace('im_', 'imtwoNormalPred%d_' % (self.camNum ) ).replace('.rgbe', '.npy')
+                # twoNormalName = imName.replace('im_', 'imtwoNormalPred%d_' % (self.camNum ) ).replace('.rgbe', '.npy')
+                twoNormalName = imName.replace('im_', 'imtwoNormalPred%d_' % (self.camNum ) ).replace('.png', '.npy')
                 if not osp.isfile(twoNormalName ):
-                    twoNormalName = imName.replace('im_', 'imtwoNormalPred%d_' % (self.camNum ) ).replace('.rgbe', '.h5')
+                    # twoNormalName = imName.replace('im_', 'imtwoNormalPred%d_' % (self.camNum ) ).replace('.rgbe', '.h5')
+                    twoNormalName = imName.replace('im_', 'imtwoNormalPred%d_' % (self.camNum ) ).replace('.png', '.h5')
                     hf = h5py.File(twoNormalName, 'r')
                     twoNormals = np.array(hf.get('data'), dtype=np.float32 )
                     hf.close()
@@ -402,10 +422,17 @@ class BatchLoader(Dataset):
             normalPointVH = np.load(normalNameVH )
             batchDict['normalPointVH'] = normalPointVH
 
-            pointName = osp.join(shapePath, 'poissonSubd_%d_pts.npy' % self.camNum )
+            # pointName = osp.join(shapePath, 'poissonSubd_%d_pts.npy' % self.camNum )
+            # point = np.load(pointName )
+            # batchDict['point'] = point
+            # normalName = osp.join(shapePath, 'poissonSubd_%d_ptsNormals.npy' % self.camNum )
+            # normalPoint = np.load(normalName )
+            # batchDict['normalPoint'] = normalPoint
+
+            pointName = osp.join(shapePath, 'poissonSubd_UniformPts.npy')
             point = np.load(pointName )
             batchDict['point'] = point
-            normalName = osp.join(shapePath, 'poissonSubd_%d_ptsNormals.npy' % self.camNum )
+            normalName = osp.join(shapePath, 'poissonSubd_UniformPtsNormals.npy')
             normalPoint = np.load(normalName )
             batchDict['normalPoint'] = normalPoint
 
