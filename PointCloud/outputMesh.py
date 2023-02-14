@@ -55,10 +55,17 @@ parser.add_argument('--isBaseLine', action='store_true', help='whether to output
 # whether to use rendering error
 parser.add_argument('--isNoRenderError', action='store_true', help='whether to use rendering error or not')
 
-opt = parser.parse_args()
-print(opt )
+# apply no GT normal and point cloud
+parser.add_argument('--no_gt', type=bool, default=True)
+# do not calculate mesh from point cloud
+parser.add_argument('--no_mesh', type=bool, default=True)
+# whether calculate and write error (needs GT)
+parser.add_argument('--calc_error', type=bool, default=False)
 
-opt.dataRoot = opt.dataRoot % opt.camNum
+opt = parser.parse_args()
+print(opt)
+
+# opt.dataRoot = opt.dataRoot % opt.camNum
 opt.gpuId = opt.deviceIds[0]
 nw = opt.normalWeight
 pw = opt.pointWeight
@@ -76,6 +83,7 @@ elif opt.viewMode == 2:
 else:
     print('Wrong: unrecognizable view selection mode')
     assert(False )
+
 
 if opt.isNoRenderError:
     opt.experiment += '_norendering'
@@ -107,6 +115,29 @@ torch.manual_seed(opt.seed )
 
 if torch.cuda.is_available() and not opt.cuda:
     print("WARNING: You have a CUDA device, so you should probably run with --cuda" )
+
+shapeName = osp.join(opt.outputRoot, 'pointCloud_%d_view_' % opt.camNum )
+if opt.viewMode == 0:
+    shapeName += 'renderError'
+elif opt.viewMode == 1:
+    shapeName += 'nearest'
+elif opt.viewMode == 2:
+    shapeName += 'average'
+
+if opt.isNoRenderError:
+    shapeName += '_norendering'
+
+if opt.isBaseLine:
+    shapeName += '_baseLine.ply'
+else:
+    shapeName += '_loss_'
+    if opt.lossMode == 0:
+        shapeName += 'view'
+    elif opt.lossMode == 1:
+        shapeName += 'nearest'
+    elif opt.lossMode == 2:
+        shapeName += 'chamfer'
+    shapeName += '.ply'
 
 # Other modules
 renderer = models.renderer(eta1 = opt.eta1, eta2 = opt.eta2,
@@ -160,6 +191,10 @@ for i, dataBatch in enumerate(brdfLoader ):
     normal1_cpu = dataBatch['normal1'].squeeze(0 )
     normal1Batch = Variable(normal1_cpu ).cuda()
 
+    # Load depth
+    depth1_cpu = dataBatch['depth1'].squeeze(0 )
+    depth1Batch = Variable(depth1_cpu ).cuda()
+
     # Load the image from cpu to gpu
     im_cpu = dataBatch['im'].squeeze(0 )
     imBatch = Variable(im_cpu ).cuda()
@@ -184,10 +219,6 @@ for i, dataBatch in enumerate(brdfLoader ):
     normal2Opt_cpu = dataBatch['normal2Opt' ].squeeze(0)
     normal2OptBatch = Variable(normal2Opt_cpu ).cuda()
 
-    # Load depth
-    depth1_cpu = dataBatch['depth1'].squeeze(0 )
-    depth1Batch = Variable(depth1_cpu ).cuda()
-
     # Load VH depth
     depth1VH_cpu = dataBatch['depth1VH'].squeeze(0 )[:, 2:3, :, :]
     depth1VHBatch = Variable(depth1VH_cpu ).cuda()
@@ -203,17 +234,18 @@ for i, dataBatch in enumerate(brdfLoader ):
     normalPointVH_cpu = dataBatch['normalPointVH'][0]
     normalPointVHBatch = Variable(normalPointVH_cpu ).cuda()
 
-    # Load nearest points
+    # Load nearest points -> just use uniform sample from Visual hull point in dataLoader.py
     point_cpu = dataBatch['point'][0]
     pointBatch = Variable(point_cpu ).cuda()
     normalPoint_cpu = dataBatch['normalPoint'][0]
     normalPointBatch = Variable(normalPoint_cpu ).cuda()
 
     # Load ground-truth points
-    pointGt_cpu = dataBatch['pointGt'][0]
-    pointGtBatch = Variable(pointGt_cpu ).cuda()
-    normalPointGt_cpu = dataBatch['normalPointGt'][0]
-    normalPointGtBatch = Variable(normalPointGt_cpu ).cuda()
+    if not opt.no_gt:
+        pointGt_cpu = dataBatch['pointGt'][0]
+        pointGtBatch = Variable(pointGt_cpu ).cuda().float()
+        normalPointGt_cpu = dataBatch['normalPointGt'][0]
+        normalPointGtBatch = Variable(normalPointGt_cpu ).cuda().float()
 
     name = dataBatch['name'][0][0]
     outRoot = '/'.join(name.split('/')[0:-1] )
@@ -248,15 +280,16 @@ for i, dataBatch in enumerate(brdfLoader ):
                 pointBatch, normalPointBatch,
                 maskTr, normal1OptBatch, error, depth1VHBatch, seg1IntBatch,
                 depth1Batch, normal1Batch )
-        gtNormal = normalPointGtBatch
-        gtPoint = pointGtBatch
+        # gtNormal = normalPointGtBatch
+        # gtPoint = pointGtBatch
 
-    if opt.lossMode == 1:
-        gtNormal = normalPointBatch
-        gtPoint = pointBatch
-    elif opt.lossMode == 2:
-        gtNormal = normalPointGtBatch
-        gtPoint = pointGtBatch
+    if not opt.no_gt:
+        if opt.lossMode == 1:
+            gtNormal = normalPointBatch
+            gtPoint = pointBatch
+        elif opt.lossMode == 2:
+            gtNormal = normalPointGtBatch
+            gtPoint = pointGtBatch
 
     normalInitial = feature[:, 0:3].clone()
 
@@ -278,110 +311,11 @@ for i, dataBatch in enumerate(brdfLoader ):
     pointPreds.append(pointPred )
     normalPreds.append(normalPred )
 
-    pointErrs = []
-    normalErrs = []
-    meanAngleErrs = []
-    medianAngleErrs = []
-
-    if opt.lossMode == 0 or opt.lossMode == 1:
-        for m in range(0, len(pointPreds ) ):
-            pointErrs.append(torch.mean(torch.pow(pointPreds[m] - gtPoint, 2) ) )
-
-        for m in range(0, len(normalPreds ) ):
-            normalErrs.append(torch.mean(torch.pow(normalPreds[m] - gtNormal, 2) ) )
-            meanAngleErrs.append(180.0/np.pi * torch.mean(torch.acos(
-                torch.clamp( torch.sum(normalPreds[m] * gtNormal, dim=1 ), -1, 1) ) ) )
-            medianAngleErrs.append(180.0/np.pi * torch.median(torch.acos(
-                torch.clamp( torch.sum( normalPreds[m] * gtNormal, dim=1), -1, 1) ) ) )
-    elif opt.lossMode == 2:
-        assert(len(pointPreds) == len(normalPreds ) )
-        for m in range(0, len(pointPreds) ):
-            dist1, id1, dist2, id2 = chamferDist(gtPoint.unsqueeze(0),
-                    pointPreds[m].unsqueeze(0) )
-            pointErrs.append(0.5 * (torch.mean(dist1) + torch.mean(dist2) )  )
-            id1, id2 = id1.long().squeeze(0).detach(), id2.long().squeeze(0).detach()
-
-            gtToPredNormal = torch.index_select(normalPreds[m], dim=0, index = id1 )
-            predToGtNormal = torch.index_select(gtNormal, dim=0, index=id2 )
-
-            normalErr_gtToPred = torch.mean(torch.pow(gtToPredNormal - gtNormal, 2) )
-            normalErr_predToGt = torch.mean(torch.pow(predToGtNormal - normalPreds[m], 2) )
-            normalErrs.append(0.5 * (normalErr_gtToPred + normalErr_predToGt ) )
-
-            meanAngle_gtToPred = 180.0/np.pi * torch.mean(torch.acos(torch.clamp(
-                torch.sum(gtToPredNormal * gtNormal, dim=1 ), -1, 1) ) )
-            meanAngle_predToGt = 180.0/np.pi * torch.mean(torch.acos(torch.clamp(
-                torch.sum(normalPreds[m] * predToGtNormal, dim=1 ), -1, 1) ) )
-            meanAngleErrs.append(0.5 * (meanAngle_gtToPred + meanAngle_predToGt ) )
-
-            medianAngle_gtToPred = 180.0/np.pi * torch.median(torch.acos(torch.clamp(
-                torch.sum( gtToPredNormal * gtNormal, dim=1), -1, 1) ) )
-            medianAngle_predToGt = 180.0/np.pi * torch.median(torch.acos(torch.clamp(
-                torch.sum( normalPreds[m] * predToGtNormal, dim=1), -1, 1) ) )
-            medianAngleErrs.append(0.5 * (medianAngle_gtToPred + medianAngle_predToGt ) )
-
-    utils.writeErrToScreen('point', pointErrs, epoch, j )
-    utils.writeErrToScreen('normal', normalErrs, epoch, j )
-    utils.writeErrToScreen('meanAngle', meanAngleErrs, epoch, j )
-    utils.writeErrToScreen('medianAngle', medianAngleErrs, epoch, j )
-
-    utils.writeErrToFile('point', pointErrs, testingLog, epoch, j )
-    utils.writeErrToFile('normal', normalErrs, testingLog, epoch, j )
-    utils.writeErrToFile('meanAngle', meanAngleErrs, testingLog, epoch, j )
-    utils.writeErrToFile('medianAngle', medianAngleErrs, testingLog, epoch, j )
-
-    pointErrsNpList = np.concatenate([pointErrsNpList, utils.turnErrorIntoNumpy(pointErrs ) ], axis=0 )
-    normalErrsNpList = np.concatenate([normalErrsNpList, utils.turnErrorIntoNumpy(normalErrs ) ], axis=0 )
-    meanAngleErrsNpList = np.concatenate([meanAngleErrsNpList, utils.turnErrorIntoNumpy(meanAngleErrs ) ], axis=0 )
-    medianAngleErrsNpList = np.concatenate([medianAngleErrsNpList, utils.turnErrorIntoNumpy(medianAngleErrs ) ], axis=0 )
-
-    utils.writeNpErrToScreen('pointAccu', np.mean(pointErrsNpList[1:j+1, :], axis=0), epoch, j )
-    utils.writeNpErrToScreen('normalAccu', np.mean(normalErrsNpList[1:j+1, :], axis=0), epoch, j )
-    utils.writeNpErrToScreen('meanAngleAccu', np.mean(meanAngleErrsNpList[1:j+1, :], axis=0), epoch, j )
-    utils.writeNpErrToScreen('medianAngleAccu', np.mean(medianAngleErrsNpList[1:j+1, :], axis=0), epoch, j )
-
-    utils.writeNpErrToFile('pointAccu', np.mean(pointErrsNpList[1:j+1, :], axis=0), testingLog, epoch, j )
-    utils.writeNpErrToFile('normalAccu', np.mean(normalErrsNpList[1:j+1, :], axis=0), testingLog, epoch, j )
-    utils.writeNpErrToFile('meanAngleAccu', np.mean(meanAngleErrsNpList[1:j+1, :], axis=0), testingLog, epoch, j )
-    utils.writeNpErrToFile('medianAngleAccu', np.mean(medianAngleErrsNpList[1:j+1, :], axis=0), testingLog, epoch, j )
-
-
-    shapeName = osp.join(opt.outputRoot, 'pointCloud_%d_view_' % opt.camNum )
-    outputName = osp.join(outRoot, 'reconstruct_%d_view_' % opt.camNum )
-    if opt.viewMode == 0:
-        shapeName += 'renderError'
-
-        outputName += 'renderError'
-    elif opt.viewMode == 1:
-        shapeName += 'nearest'
-        outputName += 'nearest'
-    elif opt.viewMode == 2:
-        shapeName += 'average'
-        outputName += 'average'
-
-    if opt.isNoRenderError:
-        shapeName += '_norendering'
-        outputName += '_norendering'
 
     if opt.isBaseLine:
-        shapeName += '_baseLine.ply'
-        outputName += '_baseLine.ply'
         pointArr = pointPreds[0].data.cpu().numpy()
         normalArr = normalPreds[0].data.cpu().numpy()
     else:
-        shapeName += '_loss_'
-        outputName += '_loss_'
-        if opt.lossMode == 0:
-            shapeName += 'view'
-            outputName += 'view'
-        elif opt.lossMode == 1:
-            shapeName += 'nearest'
-            outputName += 'nearest'
-        elif opt.lossMode == 2:
-            shapeName += 'chamfer'
-            outputName += 'chamfer'
-        shapeName += '.ply'
-        outputName += '.ply'
         pointArr = pointPreds[1].data.cpu().numpy()
         normalArr = normalPreds[1].data.cpu().numpy()
 
@@ -390,24 +324,6 @@ for i, dataBatch in enumerate(brdfLoader ):
     pcd.normals = o3d.utility.Vector3dVector(normalArr )
     pcd.colors = o3d.utility.Vector3dVector(0.5 * (normalArr + 1) )
     o3d.io.write_point_cloud(shapeName, pcd)
-
-    colmapTrim = 3
-    colmapDepth = 8
-    colmapNumThreads = 8
-    cmd = 'colmap poisson_mesher --input_path %s ' \
-            + '--PoissonMeshing.trim %d ' \
-            + '--PoissonMeshing.depth %d ' \
-            + '--PoissonMeshing.num_threads %d ' \
-            + '--output_path %s'
-    cmd = cmd % (shapeName, colmapTrim, colmapDepth, colmapNumThreads, outputName )
-    print(cmd )
-    os.system(cmd )
-
-    # Smooth the mesh
-    cmd = 'xvfb-run -a -s "-screen 0 800x600x24" meshlabserver -i %s -o %s -om vn -s remesh.mlx' % \
-            (outputName,  outputName.replace('.ply', '_Subd.ply') )
-    print(cmd )
-    os.system(cmd )
 
     if j == 1 or j % 2000 == 0:
         vutils.save_image( (torch.clamp(imBatch, 0, 1)**(1.0/2.2) *seg1IntBatch.expand_as(imBatch) ).data,
@@ -424,9 +340,118 @@ for i, dataBatch in enumerate(brdfLoader ):
         for m in range(0, len(pointPreds ) ):
             utils.writePointWithComputedNormal(osp.join(opt.outputRoot, '%d_predPt_%d.ply' % (j, m) ), pointPreds[m], normalPreds[m] )
             utils.writePointWithPredictedNormal(osp.join(opt.outputRoot, '%d_predNormal_%d.ply' % (j, m) ), pointPreds[m], normalPreds[m] )
+    
+    if not opt.no_mesh:
+        outputName = osp.join(outRoot, 'reconstruct_%d_view_' % opt.camNum )
+        if opt.viewMode == 0:
+            outputName += 'renderError'
+        elif opt.viewMode == 1:
+            outputName += 'nearest'
+        elif opt.viewMode == 2:
+            outputName += 'average'
+
+        if opt.isNoRenderError:
+            outputName += '_norendering'
+
+        if opt.isBaseLine:
+            outputName += '_baseLine.ply'
+        else:
+            outputName += '_loss_'
+            if opt.lossMode == 0:
+                outputName += 'view'
+            elif opt.lossMode == 1:
+                outputName += 'nearest'
+            elif opt.lossMode == 2:
+                outputName += 'chamfer'
+            outputName += '.ply'
+        colmapTrim = 3
+        colmapDepth = 8
+        colmapNumThreads = 8
+        cmd = 'colmap poisson_mesher --input_path %s ' \
+                + '--PoissonMeshing.trim %d ' \
+                + '--PoissonMeshing.depth %d ' \
+                + '--PoissonMeshing.num_threads %d ' \
+                + '--output_path %s'
+        cmd = cmd % (shapeName, colmapTrim, colmapDepth, colmapNumThreads, outputName )
+        print(cmd )
+        os.system(cmd )
+
+        # Smooth the mesh
+        cmd = 'xvfb-run -a -s "-screen 0 800x600x24" meshlabserver -i %s -o %s -om vn -s remesh.mlx' % \
+                (outputName,  outputName.replace('.ply', '_Subd.ply') )
+        print(cmd )
+        os.system(cmd )
+
+    if not opt.no_gt and opt.calc_error:
+        pointErrs = []
+        normalErrs = []
+        meanAngleErrs = []
+        medianAngleErrs = []
+        if opt.lossMode == 0 or opt.lossMode == 1:
+            for m in range(0, len(pointPreds ) ):
+                pointErrs.append(torch.mean(torch.pow(pointPreds[m] - gtPoint, 2) ) )
+
+            for m in range(0, len(normalPreds ) ):
+                normalErrs.append(torch.mean(torch.pow(normalPreds[m] - gtNormal, 2) ) )
+                meanAngleErrs.append(180.0/np.pi * torch.mean(torch.acos(
+                    torch.clamp( torch.sum(normalPreds[m] * gtNormal, dim=1 ), -1, 1) ) ) )
+                medianAngleErrs.append(180.0/np.pi * torch.median(torch.acos(
+                    torch.clamp( torch.sum( normalPreds[m] * gtNormal, dim=1), -1, 1) ) ) )
+        elif opt.lossMode == 2:
+            assert(len(pointPreds) == len(normalPreds ) )
+            for m in range(0, len(pointPreds) ):
+                dist1, id1, dist2, id2 = chamferDist(gtPoint.unsqueeze(0),
+                        pointPreds[m].unsqueeze(0) )
+                pointErrs.append(0.5 * (torch.mean(dist1) + torch.mean(dist2) )  )
+                id1, id2 = id1.long().squeeze(0).detach(), id2.long().squeeze(0).detach()
+
+                gtToPredNormal = torch.index_select(normalPreds[m], dim=0, index = id1 )
+                predToGtNormal = torch.index_select(gtNormal, dim=0, index=id2 )
+
+                normalErr_gtToPred = torch.mean(torch.pow(gtToPredNormal - gtNormal, 2) )
+                normalErr_predToGt = torch.mean(torch.pow(predToGtNormal - normalPreds[m], 2) )
+                normalErrs.append(0.5 * (normalErr_gtToPred + normalErr_predToGt ) )
+
+                meanAngle_gtToPred = 180.0/np.pi * torch.mean(torch.acos(torch.clamp(
+                    torch.sum(gtToPredNormal * gtNormal, dim=1 ), -1, 1) ) )
+                meanAngle_predToGt = 180.0/np.pi * torch.mean(torch.acos(torch.clamp(
+                    torch.sum(normalPreds[m] * predToGtNormal, dim=1 ), -1, 1) ) )
+                meanAngleErrs.append(0.5 * (meanAngle_gtToPred + meanAngle_predToGt ) )
+
+                medianAngle_gtToPred = 180.0/np.pi * torch.median(torch.acos(torch.clamp(
+                    torch.sum( gtToPredNormal * gtNormal, dim=1), -1, 1) ) )
+                medianAngle_predToGt = 180.0/np.pi * torch.median(torch.acos(torch.clamp(
+                    torch.sum( normalPreds[m] * predToGtNormal, dim=1), -1, 1) ) )
+                medianAngleErrs.append(0.5 * (medianAngle_gtToPred + medianAngle_predToGt ) )
+
+        utils.writeErrToScreen('point', pointErrs, epoch, j )
+        utils.writeErrToScreen('normal', normalErrs, epoch, j )
+        utils.writeErrToScreen('meanAngle', meanAngleErrs, epoch, j )
+        utils.writeErrToScreen('medianAngle', medianAngleErrs, epoch, j )
+
+        utils.writeErrToFile('point', pointErrs, testingLog, epoch, j )
+        utils.writeErrToFile('normal', normalErrs, testingLog, epoch, j )
+        utils.writeErrToFile('meanAngle', meanAngleErrs, testingLog, epoch, j )
+        utils.writeErrToFile('medianAngle', medianAngleErrs, testingLog, epoch, j )
+
+        pointErrsNpList = np.concatenate([pointErrsNpList, utils.turnErrorIntoNumpy(pointErrs ) ], axis=0 )
+        normalErrsNpList = np.concatenate([normalErrsNpList, utils.turnErrorIntoNumpy(normalErrs ) ], axis=0 )
+        meanAngleErrsNpList = np.concatenate([meanAngleErrsNpList, utils.turnErrorIntoNumpy(meanAngleErrs ) ], axis=0 )
+        medianAngleErrsNpList = np.concatenate([medianAngleErrsNpList, utils.turnErrorIntoNumpy(medianAngleErrs ) ], axis=0 )
+
+        utils.writeNpErrToScreen('pointAccu', np.mean(pointErrsNpList[1:j+1, :], axis=0), epoch, j )
+        utils.writeNpErrToScreen('normalAccu', np.mean(normalErrsNpList[1:j+1, :], axis=0), epoch, j )
+        utils.writeNpErrToScreen('meanAngleAccu', np.mean(meanAngleErrsNpList[1:j+1, :], axis=0), epoch, j )
+        utils.writeNpErrToScreen('medianAngleAccu', np.mean(medianAngleErrsNpList[1:j+1, :], axis=0), epoch, j )
+
+        utils.writeNpErrToFile('pointAccu', np.mean(pointErrsNpList[1:j+1, :], axis=0), testingLog, epoch, j )
+        utils.writeNpErrToFile('normalAccu', np.mean(normalErrsNpList[1:j+1, :], axis=0), testingLog, epoch, j )
+        utils.writeNpErrToFile('meanAngleAccu', np.mean(meanAngleErrsNpList[1:j+1, :], axis=0), testingLog, epoch, j )
+        utils.writeNpErrToFile('medianAngleAccu', np.mean(medianAngleErrsNpList[1:j+1, :], axis=0), testingLog, epoch, j )
 
 testingLog.close()
 
 # Save the error record
-np.save('{0}/pointError_{1}.npy'.format(opt.outputRoot, epoch), pointErrsNpList )
-np.save('{0}/normalError_{1}.npy'.format(opt.outputRoot, epoch), normalErrsNpList )
+if opt.calc_error:
+    np.save('{0}/pointError_{1}.npy'.format(opt.outputRoot, epoch), pointErrsNpList )
+    np.save('{0}/normalError_{1}.npy'.format(opt.outputRoot, epoch), normalErrsNpList )
