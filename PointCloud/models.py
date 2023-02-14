@@ -483,10 +483,10 @@ class groundtruthSampler():
         normalBest = normalPointsVH.clone()
         maskTrBest = Variable(torch.zeros([points.size(0), 1], dtype=torch.float32 ) ).cuda()
         tanThetaBest = Variable(2 * torch.ones([points.size(0), 1], dtype=torch.float32 ) ).cuda()
-        errorBest = Variable(2 * torch.ones([points.size(0), 1], dtype=torch.float32 ) ).cuda()
+        errorBest = Variable(2 * torch.ones([points.size(0), 1], dtype=torch.float64 ) ).cuda()
         viewBest = Variable(torch.zeros([points.size(0)], dtype=torch.float32 ) ).cuda()
-        gtPointBest = points.clone()
-        gtNormalBest = normalPoints.clone()
+        gtPointBest = points.clone().float()
+        gtNormalBest = normalPoints.clone().float()
 
         for n in range(0, self.camNum ):
             maskTr = maskTrBatch[n, :].reshape([self.imHeight * self.imWidth, 1] )
@@ -563,9 +563,9 @@ class groundtruthSampler():
             gtNormalBest[isChange != 0, :] = points_normal1World[isChange != 0, :]
 
         if self.isNoRenderError:
-            feature = torch.cat([normalBest, maskTrBest * 0, tanThetaBest, errorBest * 0], dim=1 )
+            feature = torch.cat([normalBest, maskTrBest * 0, tanThetaBest, errorBest * 0], dim=1 ).float()
         else:
-            feature = torch.cat([normalBest, maskTrBest, tanThetaBest, errorBest], dim=1 )
+            feature = torch.cat([normalBest, maskTrBest, tanThetaBest, errorBest], dim=1 ).float()
 
         return feature, gtNormalBest, gtPointBest, viewBest
 

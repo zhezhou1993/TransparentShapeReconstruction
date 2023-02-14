@@ -417,10 +417,8 @@ class BatchLoader(Dataset):
 
             pointNameVH = osp.join(shapePath, 'visualHullSubd_%d_pts.npy' % self.camNum )
             pointVH = np.load(pointNameVH )
-            batchDict['pointVH'] = pointVH
             normalNameVH = osp.join(shapePath, 'visualHullSubd_%d_ptsNormals.npy' % self.camNum )
             normalPointVH = np.load(normalNameVH )
-            batchDict['normalPointVH'] = normalPointVH
 
             # pointName = osp.join(shapePath, 'poissonSubd_%d_pts.npy' % self.camNum )
             # point = np.load(pointName )
@@ -431,9 +429,18 @@ class BatchLoader(Dataset):
 
             pointName = osp.join(shapePath, 'poissonSubd_UniformPts.npy')
             point = np.load(pointName )
-            batchDict['point'] = point
             normalName = osp.join(shapePath, 'poissonSubd_UniformPtsNormals.npy')
             normalPoint = np.load(normalName )
+
+            # # add patch to trim to same number of points for (normal)pointVH and (normal)point
+            n = min(len(pointVH), len(point))
+            pointVH = pointVH[:n]
+            normalPointVH = normalPointVH[:n]
+            point = point[:n]
+            normalPoint = normalPoint[:n]
+            batchDict['pointVH'] = pointVH
+            batchDict['point'] = point
+            batchDict['normalPointVH'] = normalPointVH
             batchDict['normalPoint'] = normalPoint
 
             pointNameGt = osp.join(shapePath, 'poissonSubd_UniformPts.npy' )
