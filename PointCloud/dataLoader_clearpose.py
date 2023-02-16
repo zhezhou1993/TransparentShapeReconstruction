@@ -1,25 +1,33 @@
+import torch
 from torch.utils.data import Dataset
+from torch.autograd import Variable
 from scipy.io import loadmat
 import cv2
 import os.path as osp
 import numpy as np
+import os
+import h5py
+
 
 class BatchLoader(Dataset):
     def __init__(self, opt):
 
         self.dataRoot = opt.dataRoot
-        self.imHeight = opt.imHeight
-        self.imWidth = opt.imWidth
+        self.imHeight = opt.imageHeight
+        self.imWidth = opt.imageWidth
         self.phase = 'TEST'
+        self.frame_interval = 200
+        self.opt = opt
 
-        self.img_idx = list(range(opt.img_idx_start, opt.img_idx_end+1, opt.img_idx_step))
+        self.shape_idx = list(range(opt.shapeStart, opt.shapeEnd))
 
-        self.camera_pose = self.load_camera(opt.meta_file)
-
-    def load_camera(self, meta_file):
-        metadata = loadmat(meta_file)
-        self.camDict = {}
-        for i in self.img_idx:
+    def load_camera(self):
+        meta_filepath = f'{self.data_folder}/metadata.mat'
+        metadata = loadmat(meta_filepath)
+        cam_file = [f for f in os.listdir(self.data_folder) if f.endswith('txt')][0]
+        self.camNum = int(cam_file.replace('cam', '').replace('.txt', ''))
+        camDict = {}
+        for i in range(0, self.camNum*self.frame_interval+1, self.frame_interval): # we hardcode frame sample rate as 200
             paramDict = {} # copied from TransparentShapeRealData/createRealData/3_computeVisualHull.py
             rt = metadata[f'{i:06d}']['rotation_translation_matrix'][0][0]
             R, T = rt[:, :3], rt[:, 3]
@@ -31,75 +39,116 @@ class BatchLoader(Dataset):
             paramDict['Up'] = -R[1]
             paramDict['cId'] = i
             paramDict['imgName'] = f'{self.dataRoot}/{i:06d}-color.png'
-            self.camDict[i] = paramDict
+            camDict[i] = paramDict
+        return camDict
 
     def __len__(self):
-        return len(self.img_idx)
+        return len(self.shape_idx)
 
     def __getitem__(self, ind):
         # normalize the normal vector so that it will be unit length
+        self.data_folder = f'{self.dataRoot}/Shape__{ind:d}/'
+        camDict = self.load_camera()
+        
         imNames = []
-        seg1s = []
-        seg2VHs = []
-        normal1VHs = []
-        normal2VHs = []
+        seg1Ints = []
         normal1s = []
+        normal2s = []
         depth1s = []
-        ims = []
-        imEs = []
+        depth1VHs = []
+        envs = []
 
         origins = []
         lookats = []
         ups = []
 
-        envs = []
-
-        for img_idx in self.img_idx:
-            imName = self.camDict[img_idx]['imgName']
-            imE, imScale = self.loadHDR(imName, imScale)
-            im = cv2.imread(f'{self.dataRoot}/{img_idx:06d}-color.png')
-            seg = cv2.imread(f'{self.dataRoot}/{img_idx:06d}-label-predict.png', -1)
+        for ind in range(self.camNum):
+            cam_ind = ind*self.frame_interval
+            imName = camDict[cam_ind]['imgName']
+            origin, lookat, up = camDict[cam_ind]['Origin'], camDict[cam_ind]['Target'], camDict[cam_ind]['Up'] # check target == lookat
+            
+            seg = cv2.imread(f'{self.data_folder}/seg_{ind+1:d}.png', -1)
             seg[seg != 0] = 1
-            im = imE * seg
-            origin, lookat, up = self.camDict[img_idx]['Origin'], self.camDict[img_idx]['Target'], self.camDict[img_idx]['Up'] # check target == lookat
-            env = cv2.imread('TransparentShapeReconstruction/RealData/Envmaps/real/env_4140.png') # TODO: change relative path if needed
-            # TODO: normal1, normal1VH, normal2VH, seg1, seg2VH should be from renderer using visual hull mesh
-            normal1 = ((cv2.imread(f'{self.dataRoot}/{img_idx:06d}-normal_true.png').astype(np.float32) / 255.) - 0.5) * 2
-            normal1VH = normal1
-            normal2VH = ((cv2.imread(f'{self.dataRoot}/{img_idx:06d}-normal_true.png').astype(np.float32) / 255.) - 0.5) * 2 # TODO: change suffix of line 69 and 67 to visual hull rendered normals
-            seg1 = seg
-            seg2VH = seg
-            depth1 = cv2.imread(f'{self.dataRoot}/{img_idx:06d}-depth_pred.png', -1)
+            hf = h5py.File(f'{self.data_folder}/imVH_twoBounce_{ind+1}.h5', 'r')
+            twoBounce = np.array(hf.get('data'), dtype=np.float32 )
+            hf.close()
+
+            if twoBounce.shape[0] != self.imWidth or twoBounce.shape[1] != self.imHeight:
+                newTwoBounce1 = cv2.resize(twoBounce[:, :, 0:3], (self.imWidth, self.imHeight ), interpolation=cv2.INTER_AREA )
+                newTwoBounce2 = cv2.resize(twoBounce[:, :, 3:6], (self.imWidth, self.imHeight ), interpolation=cv2.INTER_AREA )
+
+                newTwoBounce4 = cv2.resize(twoBounce[:, :, 6:9], (self.imWidth, self.imHeight ), interpolation=cv2.INTER_AREA )
+                newTwoBounce5 = cv2.resize(twoBounce[:, :, 9:12], (self.imWidth, self.imHeight ), interpolation=cv2.INTER_AREA )
+
+                twoBounce = np.concatenate((newTwoBounce1, newTwoBounce2, newTwoBounce4, newTwoBounce5), axis=2)
+
+            normal1 = twoBounce[:, :, 0:3].transpose([2, 0, 1] )
+            normal1 = np.ascontiguousarray(normal1 )
+            # TODO: normal = cv2.imread(PATH) / 255
+            normal1 = normal1 / np.sqrt(np.maximum(np.sum(normal1 * normal1, axis=0), 1e-10) )[np.newaxis, :]
+            normal1 = normal1 * seg
+
+
+            normal2 = twoBounce[:, :, 6:9].transpose([2, 0, 1] )
+            normal2 = np.ascontiguousarray(normal2 )
+            normal2 = normal2 / np.sqrt(np.maximum(np.sum(normal2 * normal2, axis=0), 1e-10) )[np.newaxis, :]
+            normal2 = normal2 * seg
+
+            depth1 = twoBounce[:, :, 3:6].transpose([2, 0, 1] )
+            depth1 = np.ascontiguousarray(depth1 )
+            depth1 = depth1 * seg
+
+            twoNormalName = f'{self.data_folder}/imtwoNormalPred{self.camNum}_{ind+1}.npy'
+            twoNormals = np.load(twoNormalName )
+            normalOpt = twoNormals[:, :, 0:3]
+            normalOpt = cv2.resize(normalOpt, (self.imWidth, self.imHeight), interpolation = cv2.INTER_AREA )
+            normalOpt = np.ascontiguousarray(normalOpt.transpose([2, 0, 1] ) )
+            normalOpt = normalOpt / np.sqrt(np.maximum(np.sum(normalOpt * normalOpt, axis=0), 1e-10) )[np.newaxis, :]
+            normalOpt = normalOpt * seg
+
+            env = cv2.cvtColor(cv2.imread(self.opt.env_path, -1), cv2.COLOR_BGRA2BGR)[:, :, ::-1]
+            #env = cv2.imread(envFileName, -1)[:, :, ::-1]
+            env = cv2.resize(env, (self.opt.envWidth, self.opt.envHeight ), interpolation=cv2.INTER_LINEAR)
+            env = np.ascontiguousarray(env )
+            env = env / 255
+            #env = env.transpose([2, 0, 1]) * imScale * scale
+            env = env.transpose([2, 0, 1]).astype(np.float32)
 
             imNames.append(imName) # TODO: change format to match dataLoader.py
-            ims.append(im)
-            imEs.append(imE)
             origins.append(origin)
             lookats.append(lookat)
             ups.append(up)
             normal1s.append(normal1)
-            normal1VHs.append(normal1VH)
-            normal2VHs.append(normal2VH)
+            normal2s.append(normal2)
             depth1s.append(depth1)
-            seg1s.append(seg1)
-            seg2VHs.append(seg2VH)
+            depth1VHs.append(depth1[[2]])
+            seg1Ints.append(seg[np.newaxis])
             envs.append(env)
+            
+        pointNameVH = osp.join(self.data_folder, 'visualHullSubd_%d_pts.npy' % self.camNum )
+        pointVH = np.load(pointNameVH )
+        normalNameVH = osp.join(self.data_folder, 'visualHullSubd_%d_ptsNormals.npy' % self.camNum )
+        normalPointVH = np.load(normalNameVH )
 
         batchDict = {
-            'name': imNames,
-            'im':  ims,
-            'imE': imEs,
             'origin': origins,
             'lookat': lookats,
             'up': ups,
             'normal1': normal1s,
-            'normal1VH': normal1VHs,
-            'normal2VH': normal2VHs,
+            'normal1Opt': normal1s,
+            'normal2Opt': normal2s,
             'depth1': depth1s,
-            'seg2VH': seg2VHs,
-            'seg1': seg1s,
+            'depth1VH': depth1VHs,
+            'seg1Int': seg1Ints,
             'env': envs,
+            'point': pointVH, # gt for evaluation only
+            'pointVH': pointVH,
+            'normalPoint': normalPointVH, # gt for evaluation only
+            'normalPointVH': normalPointVH
         }
+
+        for key in batchDict:
+            batchDict[key] = torch.tensor(np.array(batchDict[key]), dtype=torch.float32)
 
         return batchDict
 
